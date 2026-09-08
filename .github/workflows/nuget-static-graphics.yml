@@ -360,11 +360,103 @@ jobs:
           path: artifacts/smoke-${{ matrix.rid }}/**
           if-no-files-found: error
 
+  smoke-macos-metal:
+    runs-on: macos-15
+    needs: pack
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.302"
+
+      - name: Download NuGet package
+        uses: actions/download-artifact@v4
+        with:
+          name: staticlink-avalonia-nuget
+          path: artifacts/nuget
+
+      - name: Publish Avalonia 12 macOS arm64 smoke app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $package = Get-ChildItem -Path "artifacts/nuget" -Filter "StaticLink.Avalonia.*.nupkg" | Where-Object { $_.Name -notlike "StaticLink.Avalonia.Native.*" } | Select-Object -First 1
+          if (-not $package) { throw "StaticLink NuGet package was not downloaded." }
+          if ($package.BaseName -notmatch '^StaticLink\.Avalonia\.(.+)$') { throw "Unexpected package name: $($package.Name)" }
+          $projectDir = Join-Path $PWD "artifacts/avalonia-metal-smoke-src"
+          pwsh ./scripts/create-avalonia-smoke.ps1 `
+            -ProjectDir $projectDir `
+            -NuGetSource (Resolve-Path "artifacts/nuget") `
+            -StaticLinkVersion $Matches[1] `
+            -AvaloniaVersion "12.1.0" `
+            -StaticLinkNativeVersion "12.1.0.1"
+          dotnet publish (Join-Path $projectDir "AvaloniaStaticLinkSmoke.csproj") `
+            -c Release `
+            -r osx-arm64 `
+            --configfile (Join-Path $projectDir "NuGet.config") `
+            /p:PublishAot=true `
+            /p:SelfContained=true `
+            /p:PublishSingleFile=true `
+            /p:StripSymbols=true `
+            /p:PublishDir="$PWD/artifacts/smoke-osx-arm64-metal/"
+
+      - name: Verify fully static third-party libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish_dir="artifacts/smoke-osx-arm64-metal"
+          test -x "$publish_dir/AvaloniaStaticLinkSmoke"
+          for library in libAvaloniaNative.dylib libSkiaSharp.dylib libHarfBuzzSharp.dylib; do
+            test ! -f "$publish_dir/$library"
+          done
+
+      - name: Run default and Metal-only smoke tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts/smoke-osx-arm64-metal
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import subprocess
+
+          for renderer in ("default", "metal"):
+              environment = os.environ.copy()
+              environment["STATICLINK_MAC_RENDERER"] = renderer
+              environment["STATICLINK_SMOKE_AUTOCLOSE"] = "1"
+              try:
+                  result = subprocess.run(
+                      ["./AvaloniaStaticLinkSmoke"],
+                      env=environment,
+                      stdout=subprocess.PIPE,
+                      stderr=subprocess.STDOUT,
+                      text=True,
+                      timeout=15,
+                  )
+              except subprocess.TimeoutExpired as exception:
+                  output = exception.stdout or ""
+                  if isinstance(output, bytes):
+                      output = output.decode(errors="replace")
+                  pathlib.Path(f"avalonia-{renderer}.log").write_text(output)
+                  raise SystemExit(f"Avalonia {renderer} smoke app timed out.\n{output}")
+
+              output = result.stdout or ""
+              pathlib.Path(f"avalonia-{renderer}.log").write_text(output)
+              print(output, end="")
+              marker = f"STATICLINK_SMOKE_READY={renderer}"
+              if result.returncode != 0 or marker not in output.splitlines():
+                  raise SystemExit(f"Avalonia {renderer} smoke app failed with exit code {result.returncode}.")
+          PY
+
   publish-nuget:
     runs-on: ubuntu-24.04
     needs:
       - pack
       - smoke-avalonia
+      - smoke-macos-metal
     steps:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -400,6 +492,7 @@ jobs:
       - preflight
       - pack
       - smoke-avalonia
+      - smoke-macos-metal
       - publish-nuget
     if: ${{ startsWith(github.ref, 'refs/tags/staticlink-avalonia-v') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_release == true) }}
     permissions:

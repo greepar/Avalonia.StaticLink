@@ -39,14 +39,16 @@ internal static class Program
 
         if (OperatingSystem.IsMacOS())
         {
-            builder = builder.With(new AvaloniaNativePlatformOptions
+            var renderer = Environment.GetEnvironmentVariable("STATICLINK_MAC_RENDERER");
+            if (!string.Equals(renderer, "default", StringComparison.OrdinalIgnoreCase))
             {
-                RenderingMode =
-                [
-                    AvaloniaNativeRenderingMode.OpenGl,
-                    AvaloniaNativeRenderingMode.Software
-                ]
-            });
+                builder = builder.With(new AvaloniaNativePlatformOptions
+                {
+                    RenderingMode = string.Equals(renderer, "metal", StringComparison.OrdinalIgnoreCase)
+                        ? [AvaloniaNativeRenderingMode.Metal]
+                        : [AvaloniaNativeRenderingMode.OpenGl, AvaloniaNativeRenderingMode.Software]
+                });
+            }
         }
 
         return builder;
